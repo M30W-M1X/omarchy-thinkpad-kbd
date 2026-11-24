@@ -1,0 +1,153 @@
+#!/usr/bin/env python3
+"""CLI for Omarchy ThinkPad Keyboard Backlight."""
+
+from __future__ import annotations
+
+import json
+import os
+import socket
+import sys
+from pathlib import Path
+
+RUNTIME_DIR = Path(os.environ.get("XDG_RUNTIME_DIR") or "/tmp")
+SOCKET_PATH = Path(
+    os.environ.get("THINKPAD_KBD_SOCKET") or (RUNTIME_DIR / "omarchy-thinkpad-kbd.sock")
+)
+LED_SYSFS = Path("/sys/class/leds/tpacpi::kbd_backlight/brightness")
+
+USAGE = """Usage: omarchy-thinkpad-kbd <command> [args]
+
+Commands:
+  status [--json]             Show daemon and keyboard backlight status
+  on | off | toggle           Enable, disable, or toggle adaptive lighting
+  mode <adaptive|static|off>  Set lighting mode
+  level <0|1|2|off|dim|bright> Set resting backlight brightness level
+  preview <effect> [seconds]  Preview effect: think, run, edit, read, agent, error, attention, done
+  event <state>               Send a raw activity state to the daemon
+"""
+
+
+def _read_hw_level() -> int:
+    try:
+        return int(LED_SYSFS.read_text().strip())
+    except Exception:
+        return 0
+
+
+def send_command(req: dict, socket_path: Path = SOCKET_PATH) -> dict:
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(1.5)
+            client.connect(str(socket_path))
+            client.sendall((json.dumps(req) + "\n").encode("utf-8"))
+            chunks = []
+            while True:
+                data = client.recv(4096)
+                if not data:
+                    break
+                chunks.append(data)
+                if b"\n" in data:
+                    break
+            raw = b"".join(chunks).decode("utf-8", errors="replace").strip()
+            return json.loads(raw) if raw else {"ok": False, "error": "empty reply"}
+    except Exception as exc:
+        return {
+            "ok": False,
+            "running": False,
+            "device": "tpacpi::kbd_backlight",
+            "enabled": False,
+            "mode": "off",
+            "state": "idle",
+            "active": False,
+            "preview": False,
+            "detail": "",
+            "level": _read_hw_level(),
+            "max_level": 2,
+            "resting_level": _read_hw_level(),
+            "error": f"daemon not running ({exc})",
+        }
+
+
+def print_status(data: dict, as_json: bool) -> int:
+    if as_json:
+        print(json.dumps(data))
+        return 0 if data.get("ok") else 1
+    if not data.get("running"):
+        print(f"Daemon:  stopped ({data.get('error', 'unreachable')})")
+        print(f"Level:   {data.get('level', 0)}/{data.get('max_level', 2)}")
+        return 1
+    levels = {0: "Off (0)", 1: "Dim (1)", 2: "Bright (2)"}
+    lvl = levels.get(data.get("level", 0), str(data.get("level")))
+    rest = levels.get(data.get("resting_level", 0), str(data.get("resting_level")))
+    print("Daemon:  running")
+    print(f"Mode:    {data.get('mode')} (adaptive={'on' if data.get('enabled') else 'off'})")
+    print(f"State:   {data.get('state')}" + (f" ({data.get('detail')})" if data.get("detail") else ""))
+    print(f"Level:   {lvl}  [resting: {rest}]")
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    if not argv or argv[0] in {"-h", "--help", "help"}:
+        print(USAGE.strip())
+        return 0
+
+    cmd = argv[0].lower()
+    args = argv[1:]
+    as_json = "--json" in args
+    args = [a for a in args if a != "--json"]
+
+    if cmd == "status":
+        return print_status(send_command({"cmd": "status"}), as_json)
+
+    if cmd == "on":
+        return print_status(send_command({"cmd": "set_enabled", "enabled": True}), as_json)
+
+    if cmd == "off":
+        return print_status(send_command({"cmd": "set_enabled", "enabled": False}), as_json)
+
+    if cmd == "toggle":
+        cur = send_command({"cmd": "status"})
+        if not cur.get("running"):
+            return print_status(cur, as_json)
+        return print_status(
+            send_command({"cmd": "set_enabled", "enabled": not bool(cur.get("enabled"))}),
+            as_json,
+        )
+
+    if cmd == "mode":
+        if not args:
+            print("error: mode requires adaptive, static, or off", file=sys.stderr)
+            return 2
+        return print_status(send_command({"cmd": "set_mode", "mode": args[0]}), as_json)
+
+    if cmd == "level":
+        if not args:
+            print("error: level requires 0, 1, 2 (or off, dim, bright)", file=sys.stderr)
+            return 2
+        aliases = {"off": "0", "low": "1", "dim": "1", "high": "2", "bright": "2"}
+        val = aliases.get(args[0].lower(), args[0])
+        return print_status(send_command({"cmd": "set_level", "level": val}), as_json)
+
+    if cmd == "preview":
+        if not args:
+            print("error: preview requires an effect name", file=sys.stderr)
+            return 2
+        req = {"cmd": "preview", "state": args[0]}
+        if len(args) > 1:
+            req["duration"] = args[1]
+        return print_status(send_command(req), as_json)
+
+    if cmd == "event":
+        if not args:
+            print("error: event requires a state name", file=sys.stderr)
+            return 2
+        return print_status(
+            send_command({"cmd": "event", "event": args[0], "detail": "cli"}), as_json
+        )
+
+    print(f"error: unknown command '{cmd}'\n\n{USAGE.strip()}", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

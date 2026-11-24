@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "thinkpad.kbd",
+  "name": "ThinkPad Backlight",
+  "version": "1.0.0",
+  "author": "Local",
+  "license": "MIT",
+  "description": "Adaptive ThinkPad keyboard backlight driven by Antigravity (AGY) activity hooks.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "ThinkPad Backlight",
+    "description": "Toggle adaptive keyboard backlight animations, adjust resting brightness, and preview AGY activity effects.",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
